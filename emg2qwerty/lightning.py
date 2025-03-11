@@ -6,16 +6,17 @@
 
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, ClassVar
-
+from typing import Any, ClassVar, Optional, Dict
+import math
 import numpy as np
 import pytorch_lightning as pl
 import torch
 from hydra.utils import instantiate
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 from torch import nn
 from torch.utils.data import ConcatDataset, DataLoader
 from torchmetrics import MetricCollection
+import torch.optim as optim
 
 from emg2qwerty import utils
 from emg2qwerty.charset import charset
@@ -28,6 +29,46 @@ from emg2qwerty.modules import (
 )
 from emg2qwerty.transforms import Transform
 
+
+class PositionalEncoding(nn.Module):
+    def __init__(self, d_model, max_len=20000):  # Increase max_len to accommodate your data
+        super().__init__()
+        
+        # Create position encodings
+        pe = torch.zeros(max_len, d_model)
+        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+        
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        
+        # Register buffer (not a parameter)
+        self.register_buffer('pe', pe.unsqueeze(1))  # Shape: [max_len, 1, d_model]
+        self.d_model = d_model
+        
+    def forward(self, x):
+        # x shape: [seq_len, batch_size, d_model]
+        seq_len = x.size(0)
+        
+        # Handle case where sequence length exceeds max_len
+        if seq_len > self.pe.size(0):
+            # Option 1: Truncate the sequence (not ideal)
+            # return x + self.pe
+            
+            # Option 2: Extend the positional encoding on-the-fly
+            device = x.device
+            position = torch.arange(0, seq_len, dtype=torch.float, device=device).unsqueeze(1)
+            div_term = torch.exp(torch.arange(0, self.d_model, 2, device=device).float() * 
+                               (-math.log(10000.0) / self.d_model))
+            
+            extended_pe = torch.zeros(seq_len, self.d_model, device=device)
+            extended_pe[:, 0::2] = torch.sin(position * div_term)
+            extended_pe[:, 1::2] = torch.cos(position * div_term)
+            
+            return x + extended_pe.unsqueeze(1)
+        else:
+            # Normal case - sequence length within max_len
+            return x + self.pe[:seq_len]
 
 class WindowedEMGDataModule(pl.LightningDataModule):
     def __init__(
@@ -269,3 +310,206 @@ class TDSConvCTCModule(pl.LightningModule):
             optimizer_config=self.hparams.optimizer,
             lr_scheduler_config=self.hparams.lr_scheduler,
         )
+
+class TDS_CNN_Transformer_Module(pl.LightningModule):
+    NUM_BANDS: ClassVar[int] = 2
+    ELECTRODE_CHANNELS: ClassVar[int] = 16
+
+    def __init__(
+        self,
+        in_features: int,
+        mlp_features: Sequence[int],
+        d_model: int,
+        nhead: int,
+        num_transformer_layers: int,
+        cnn_channels: Sequence[int],
+        kernel_sizes: Sequence[int],
+        optimizer: DictConfig,
+        lr_scheduler: DictConfig,
+        decoder: DictConfig,
+        
+    ) -> None:
+        super().__init__()
+        self.save_hyperparameters()
+
+        # Rest of the initialization remains the same as in your original code
+        num_features = self.NUM_BANDS * mlp_features[-1]
+
+        self.preprocessor = nn.Sequential(
+            SpectrogramNorm(channels=self.NUM_BANDS * self.ELECTRODE_CHANNELS),
+            MultiBandRotationInvariantMLP(
+                in_features=in_features,
+                mlp_features=mlp_features,
+                num_bands=self.NUM_BANDS,
+            ),
+            nn.Flatten(start_dim=2)
+        )
+        # replace TDSConvEncoder with CNN + Pos Enc + Transformer Layer
+        self.cnn_layers = self._create_cnn_layers(num_features, cnn_channels, kernel_sizes)
+        self.feature_projection = nn.Linear(cnn_channels[-1], d_model)
+        self.positional_encoding = PositionalEncoding(d_model)
+
+        transformer_layer = nn.TransformerEncoderLayer(
+            d_model=d_model, 
+            nhead=nhead, 
+            dim_feedforward=d_model * 4,
+            dropout=0.1,
+            batch_first=False
+        )
+        self.transformer_encoder = nn.TransformerEncoder(
+            transformer_layer, 
+            num_layers=num_transformer_layers
+        )
+
+        #back to fc layer
+        self.output_layer = nn.Sequential(
+            nn.Linear(d_model, charset().num_classes),
+            nn.LogSoftmax(dim=-1)
+        )
+
+        self.ctc_loss = nn.CTCLoss(blank=charset().null_class)
+        self.decoder = instantiate(decoder) if decoder else None
+
+        metrics = MetricCollection([CharacterErrorRates()])
+        self.metrics = nn.ModuleDict(
+            {f"{phase}_metrics": metrics.clone(prefix=f"{phase}/")
+             for phase in ["train", "val", "test"]}
+        )
+
+    def _create_cnn_layers(
+        self, 
+        in_channels: int, 
+        cnn_channels: Sequence[int], 
+        kernel_sizes: Sequence[int]
+    ) -> nn.Module:
+        assert len(cnn_channels) == len(kernel_sizes), "Must have same number of channels and kernel sizes"
+        
+        layers = []
+        current_in_channels = in_channels
+        
+        for out_channels, kernel_size in zip(cnn_channels, kernel_sizes):
+            layers.extend([
+                nn.Conv1d(
+                    in_channels=current_in_channels, 
+                    out_channels=out_channels, 
+                    kernel_size=kernel_size, 
+                    padding=kernel_size // 2
+                ),
+                nn.BatchNorm1d(out_channels),
+                nn.ReLU(),
+                nn.MaxPool1d(kernel_size=2, stride=2)
+            ])
+            current_in_channels = out_channels
+        
+        return nn.Sequential(*layers)
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        print(f"Input shape: {inputs.shape}")
+        # After preprocessing
+        x = self.preprocessor(inputs)
+        print(f"After preprocessor: {x.shape}")
+        # After CNN
+        x = self.cnn_layers(x.permute(1, 2, 0))
+        print(f"After CNN: {x.shape}")
+        # After projection
+        x = self.feature_projection(x.permute(2, 0, 1))
+        print(f"After projection: {x.shape}")
+        
+        # Add positional encoding
+        x = self.positional_encoding(x)
+        
+        # Apply transformer encoder
+        x = self.transformer_encoder(x)
+        
+        # Final output layer
+        return self.output_layer(x)
+
+
+    def _step(
+        self, phase: str, batch: dict[str, torch.Tensor], *args, **kwargs
+    ) -> torch.Tensor:
+        inputs = batch["inputs"]
+        targets = batch["targets"]
+        input_lengths = batch["input_lengths"]
+        target_lengths = batch["target_lengths"]
+        N = len(input_lengths)  # batch_size
+
+        emissions = self.forward(inputs)
+
+        # Compute output lengths 
+        # Note: CNN and pooling will reduce sequence length THIS IS DIFF
+        # emission_lengths = input_lengths // (2 ** len(self.hparams.cnn_channels))
+        emission_lengths = torch.clamp(input_lengths // (2 ** len(self.hparams.cnn_channels)), min=1)
+        
+        print(f"Emissions shape: {emissions.shape}")
+        print(f"Targets shape: {targets.shape}")
+        print(f"Emission lengths: {emission_lengths}")
+        print(f"Target lengths: {target_lengths}")
+
+        loss = self.ctc_loss(
+            log_probs=emissions,  # (T, N, num_classes)
+            targets=targets.transpose(0, 1),  # (T, N) -> (N, T)
+            input_lengths=emission_lengths,  # (N,)
+            target_lengths=target_lengths,  # (N,)
+        )
+
+        # Decode emissions
+        predictions = self.decoder.decode_batch(
+            emissions=emissions.detach().cpu().numpy(),
+            emission_lengths=emission_lengths.detach().cpu().numpy(),
+        )
+
+        # Update metrics
+        metrics = self.metrics[f"{phase}_metrics"]
+        targets = targets.detach().cpu().numpy()
+        target_lengths = target_lengths.detach().cpu().numpy()
+        for i in range(N):
+            # Unpad targets (T, N) for batch entry
+            target = LabelData.from_labels(targets[: target_lengths[i], i])
+            metrics.update(prediction=predictions[i], target=target)
+
+        self.log(f"{phase}/loss", loss, batch_size=N, sync_dist=True)
+        return loss
+
+    def _epoch_end(self, phase: str) -> None:
+        metrics = self.metrics[f"{phase}_metrics"]
+        self.log_dict(metrics.compute(), sync_dist=True)
+        metrics.reset()
+
+    def training_step(self, *args, **kwargs) -> torch.Tensor:
+        return self._step("train", *args, **kwargs)
+
+    def validation_step(self, *args, **kwargs) -> torch.Tensor:
+        return self._step("val", *args, **kwargs)
+
+    def test_step(self, *args, **kwargs) -> torch.Tensor:
+        return self._step("test", *args, **kwargs)
+
+    def on_train_epoch_end(self) -> None:
+        self._epoch_end("train")
+
+    def on_validation_epoch_end(self) -> None:
+        self._epoch_end("val")
+
+    def on_test_epoch_end(self) -> None:
+        self._epoch_end("test")
+
+    def configure_optimizers(self) -> dict[str, Any]:
+        return utils.instantiate_optimizer_and_scheduler(
+            self.parameters(),
+            optimizer_config=self.hparams.optimizer,
+            lr_scheduler_config=self.hparams.lr_scheduler,
+        )
+
+
+
+
+
+
+
+
+
+
+
+
+

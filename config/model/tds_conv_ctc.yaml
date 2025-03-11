@@ -1,11 +1,14 @@
 # @package _global_
 module:
-  _target_: emg2qwerty.lightning.TDSConvCTCModule
+  _target_: emg2qwerty.lightning.TDS_CNN_Transformer_Module
   in_features: 528  # freq * channels = (n_fft // 2 + 1) * 16
   mlp_features: [384]
-  block_channels: [24, 24, 24, 24]
-  kernel_width: 32  # Total temporal receptive field of 125 samples given 4 layers
-
+  d_model: 256
+  nhead: 8
+  num_transformer_layers: 4
+  cnn_channels: [64, 128, 256]
+  kernel_sizes: [3, 3, 3]
+  
 datamodule:
   _target_: emg2qwerty.lightning.WindowedEMGDataModule
   window_length: 8000  # 4 sec windows for 2kHz EMG

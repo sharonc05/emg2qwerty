@@ -1,10 +1,13 @@
 # @package _global_
 module:
-  _target_: emg2qwerty.lightning.TDSConvCTCModule
+  _target_: emg2qwerty.lightning.CNN_RNN_CTCModule
   in_features: 528  # freq * channels = (n_fft // 2 + 1) * 16
   mlp_features: [384]
   block_channels: [24, 24, 24, 24]
   kernel_width: 32  # Total temporal receptive field of 125 samples given 4 layers
+  rnn_hidden_size: 300  #ADDED5 increase to 300
+  rnn_num_layers: 1     #ADDED6 more layers makes it harder to optimize
+
 
 datamodule:
   _target_: emg2qwerty.lightning.WindowedEMGDataModule

@@ -1,4 +1,5 @@
 # @package _global_
 optimizer:
   _target_: torch.optim.Adam
-  lr: 1e-3
+  lr: 7.58e-4 #ADDED1
+  weight_decay: 1e-4 #ADDED2

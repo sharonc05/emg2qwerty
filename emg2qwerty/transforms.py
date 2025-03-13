@@ -270,7 +270,6 @@ class Augmentations:
                 TemporalAlignmentJitter(max_offset=3),
                 self.time_warp,
                 self.add_gaussian_noise,
-                self.jitter,
                 self.channel_dropout,
                 self.frequency_shift,
             ]
@@ -298,11 +297,6 @@ class Augmentations:
     def add_gaussian_noise(signal: torch.Tensor, noise_level: float = 0.01) -> torch.Tensor:
         noise = torch.tensor(np.random.normal(0, noise_level, signal.shape), dtype=torch.float32)
         return torch.nan_to_num(signal + noise, nan=0.0, posinf=1e6, neginf=-1e6)  # Ensure stability
-
-    @staticmethod 
-    def jitter(signal: torch.Tensor, sigma: float = 0.05) -> torch.Tensor:
-        noise = torch.tensor(np.random.normal(0, sigma, signal.shape), dtype=torch.float32)
-        return torch.nan_to_num(signal + noise, nan=0.0, posinf=1e6, neginf=-1e6)
 
     @staticmethod 
     def channel_dropout(signal: torch.Tensor, drop_rate: float = 0.1) -> torch.Tensor:

@@ -18,7 +18,7 @@ import torch
 from torch import nn
 
 from emg2qwerty.charset import CharacterSet, charset
-from emg2qwerty.transforms import ToTensor, Transform
+from emg2qwerty.transforms import ToTensor, Transform, Augmentations
 
 
 @dataclass
@@ -451,6 +451,8 @@ class WindowedEMGDataset(torch.utils.data.Dataset):
     padding: InitVar[tuple[int, int]] = (0, 0)
     jitter: bool = False
     transform: Transform[np.ndarray, torch.Tensor] = field(default_factory=ToTensor)
+    augment: bool = False
+    augmentation_pipeline: Transform[torch.Tensor, torch.Tensor] = field(default_factory=lambda: Augmentations(prob=1))
 
     def __post_init__(
         self,
@@ -502,6 +504,10 @@ class WindowedEMGDataset(torch.utils.data.Dataset):
 
         # Extract labels corresponding to the original (un-padded) window.
         timestamps = window[EMGSessionData.TIMESTAMPS]
+
+        if self.augment:
+            emg = self.augmentation_pipeline(emg)
+
         start_t = timestamps[offset - window_start]
         end_t = timestamps[(offset + self.window_length - 1) - window_start]
         label_data = self.session.ground_truth(start_t, end_t)

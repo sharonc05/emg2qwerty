@@ -83,6 +83,7 @@ def main(config: DictConfig):
         train_transform=_build_transform(config.transforms.train),
         val_transform=_build_transform(config.transforms.val),
         test_transform=_build_transform(config.transforms.test),
+        augment=True, # apply augmentation only during training, not validation/testing
         _convert_="object",
     )
 

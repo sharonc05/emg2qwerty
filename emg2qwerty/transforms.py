@@ -12,11 +12,20 @@ import numpy as np
 import torch
 import torchaudio
 
+import random
+from scipy.interpolate import interp1d
+from numpy.fft import fft, ifft
 
 TTransformIn = TypeVar("TTransformIn")
 TTransformOut = TypeVar("TTransformOut")
 Transform = Callable[[TTransformIn], TTransformOut]
 
+def safe_tensor(t: torch.Tensor, nan: float = 0.0, posinf: float = 1e6, neginf: float = -1e6) -> torch.Tensor:
+    """
+    Replace NaN and Inf values in a tensor with specified numbers.
+    Apply this only once at the end of a transform chain.
+    """
+    return torch.nan_to_num(t, nan=nan, posinf=posinf, neginf=neginf)
 
 @dataclass
 class ToTensor:
@@ -185,7 +194,7 @@ class LogSpectrogram:
     def __call__(self, tensor: torch.Tensor) -> torch.Tensor:
         x = tensor.movedim(0, -1)  # (T, ..., C) -> (..., C, T)
         spec = self.spectrogram(x)  # (..., C, freq, T)
-        logspec = torch.log10(spec + 1e-6)  # (..., C, freq, T)
+        logspec = torch.log10(spec + 1e-6)  # Prevent log(0)
         return logspec.movedim(-1, 0)  # (T, ..., C, freq)
 
 
@@ -243,3 +252,74 @@ class SpecAugment:
 
         # (..., C, freq, T) -> (T, ..., C, freq)
         return x.movedim(-1, 0)
+
+@dataclass
+class Augmentations:
+    """
+    Unified augmentation pipeline.
+    When prob > 0, each augmentation in the list is applied with a 50% chance.
+    """
+    prob: float = 0.5  # Set to a nonzero value to enable augmentation.
+    augmentations: Sequence[Transform[torch.Tensor, torch.Tensor]] = None
+
+    def __post_init__(self):
+        if self.augmentations is None:
+            self.augmentations = [
+                RandomBandRotation(offsets=(-1, 0, 1)),
+                SpecAugment(n_time_masks=2, time_mask_param=5, n_freq_masks=2, freq_mask_param=5),
+                TemporalAlignmentJitter(max_offset=3),
+                self.time_warp,
+                self.add_gaussian_noise,
+                self.jitter,
+                self.channel_dropout,
+                self.frequency_shift,
+            ]
+
+    def __call__(self, signal: torch.Tensor) -> torch.Tensor:
+        if random.random() > self.prob:
+            return signal
+        for aug_func in self.augmentations:
+            if random.random() > 0.5:
+                signal = aug_func(signal)
+        return signal
+    
+    @staticmethod    
+    def time_warp(signal: torch.Tensor, alpha: float = 0.2) -> torch.Tensor:
+        time_steps = np.linspace(0, 1, len(signal))
+        stretched_steps = np.cumsum(np.random.uniform(1 - alpha, 1 + alpha, len(signal)))
+        stretched_steps = stretched_steps / max(stretched_steps[-1], 1e-6)  # Avoid division by zero
+
+        interpolator = interp1d(stretched_steps, signal.numpy(), axis=0, fill_value="extrapolate")
+        warped_signal = interpolator(time_steps)
+
+        return torch.tensor(np.nan_to_num(warped_signal, nan=0.0), dtype=torch.float32)  # Remove NaNs
+
+    @staticmethod 
+    def add_gaussian_noise(signal: torch.Tensor, noise_level: float = 0.01) -> torch.Tensor:
+        noise = torch.tensor(np.random.normal(0, noise_level, signal.shape), dtype=torch.float32)
+        return torch.nan_to_num(signal + noise, nan=0.0, posinf=1e6, neginf=-1e6)  # Ensure stability
+
+    @staticmethod 
+    def jitter(signal: torch.Tensor, sigma: float = 0.05) -> torch.Tensor:
+        noise = torch.tensor(np.random.normal(0, sigma, signal.shape), dtype=torch.float32)
+        return torch.nan_to_num(signal + noise, nan=0.0, posinf=1e6, neginf=-1e6)
+
+    @staticmethod 
+    def channel_dropout(signal: torch.Tensor, drop_rate: float = 0.1) -> torch.Tensor:
+        mask = np.random.choice([0, 1], size=signal.shape, p=[drop_rate, 1 - drop_rate])
+        dropped_signal = signal * torch.tensor(mask, dtype=torch.float32)
+        
+        return torch.nan_to_num(dropped_signal, nan=0.0, posinf=1e6, neginf=-1e6)  # Ensure stability
+
+    @staticmethod 
+    def frequency_shift(signal: torch.Tensor, shift_factor: float = 0.1) -> torch.Tensor:
+        freq_signal = fft(signal.numpy())
+
+        # Ensure valid shift
+        shift_amount = int(shift_factor * len(freq_signal))
+        shifted_signal = np.roll(freq_signal, shift_amount)
+
+        # Convert back to real space and sanitize values
+        result = torch.tensor(np.real(ifft(shifted_signal)), dtype=torch.float32)
+        
+        return torch.nan_to_num(result, nan=0.0, posinf=1e6, neginf=-1e6)  # Remove NaNs and Infs

@@ -42,6 +42,7 @@ class WindowedEMGDataModule(pl.LightningDataModule):
         train_transform: Transform[np.ndarray, torch.Tensor],
         val_transform: Transform[np.ndarray, torch.Tensor],
         test_transform: Transform[np.ndarray, torch.Tensor],
+        augment: bool = False,
     ) -> None:
         super().__init__()
 
@@ -58,6 +59,7 @@ class WindowedEMGDataModule(pl.LightningDataModule):
         self.train_transform = train_transform
         self.val_transform = val_transform
         self.test_transform = test_transform
+        self.augment = augment
 
     def setup(self, stage: str | None = None) -> None:
         self.train_dataset = ConcatDataset(
@@ -68,6 +70,7 @@ class WindowedEMGDataModule(pl.LightningDataModule):
                     window_length=self.window_length,
                     padding=self.padding,
                     jitter=True,
+                    augment=self.augment,
                 )
                 for hdf5_path in self.train_sessions
             ]
@@ -80,6 +83,7 @@ class WindowedEMGDataModule(pl.LightningDataModule):
                     window_length=self.window_length,
                     padding=self.padding,
                     jitter=False,
+                    augment=False,
                 )
                 for hdf5_path in self.val_sessions
             ]
@@ -94,6 +98,7 @@ class WindowedEMGDataModule(pl.LightningDataModule):
                     window_length=None,
                     padding=(0, 0),
                     jitter=False,
+                    augment=False,
                 )
                 for hdf5_path in self.test_sessions
             ]

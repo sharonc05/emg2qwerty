@@ -1,4 +1,13 @@
 # C147/247 Final Project
+
+### Models
+- Our branches in this project represent our experiments for this project and includes the branches:
+1. cnn_gru_and_gru - This branch contains the code for CNN+GRU module (though it has been commented out to avoid conflicts with the names for the GRU implementation below) and the GRU module implemented in emg2qwerty/lightning.py. It also has the model configuration for the GRU+CNN and GRU models in tds_conv_ctc.yaml.
+2. cnn_lstm - This branch contains the code for the CNN+LSTM (CNN_RNN_CTCModule class) contained in lightning.py and the configuration for the CNN+LSTM model in tds_conv_ctc.yaml. This branch contains the best performing model for our experiment.
+3. cnn_transformer - This branch contains the code for the CNN+Transformer (CNN_Transformer_CTCModule class) contained in lightning.py and the configuration for the CNN+Transformer model in tds_conv_ctc.yaml.
+4. dat-aug - This branch contains data augmentation functions in transforms.py.
+
+
 ### Winter 2025 - _Professor Jonathan Kao_
 
 This course project is built upon the emg2qwerty work from Meta. The first section of this README provides some guidance for working with the repo and contains a running list of FAQs. **Note that the rest of the README is from the original repo and we encourage you to take a look at their work.**
